@@ -1,0 +1,253 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>コード進行パズル</title>
+<style>
+:root{
+  --bg:#15101f; --panel:#1f1830; --accent:#a26bfa; --accent2:#6b3fa0;
+  --text:#ece6fb; --sub:#9d8ec2; --piece:#2c2145; --piece-b:#7c4fd6;
+}
+*{box-sizing:border-box;}
+html,body{height:100%;}
+body{
+  margin:0; background:radial-gradient(circle at 20% 10%,#241a3a,var(--bg) 60%);
+  color:var(--text); font-family:'Hiragino Sans','Yu Gothic',sans-serif;
+  padding-top:env(safe-area-inset-top,0px); padding-bottom:env(safe-area-inset-bottom,0px);
+  min-height:100%;
+}
+h1{font-size:1.3rem; text-align:center; margin:1.2rem 0 .3rem; letter-spacing:.05em;}
+.sub{text-align:center; color:var(--sub); font-size:.8rem; margin-bottom:1rem;}
+.controls{display:flex; gap:.6rem; justify-content:center; flex-wrap:wrap; margin-bottom:1rem;}
+select,button{
+  background:var(--panel); color:var(--text); border:1px solid var(--accent2);
+  border-radius:10px; padding:.5rem .9rem; font-size:.9rem; cursor:pointer;
+}
+button.primary{background:var(--accent); color:#150f22; font-weight:bold; border:none;}
+button:active{transform:scale(.96);}
+.wrap{max-width:820px; margin:0 auto; padding:0 1rem 2rem;}
+.section-title{font-size:.8rem; color:var(--sub); margin:1.2rem 0 .5rem;}
+#palette,#sequence{
+  display:flex; flex-wrap:wrap; gap:.7rem; min-height:80px;
+  background:var(--panel); border-radius:16px; padding:.9rem;
+  border:1px dashed var(--accent2);
+}
+#sequence{min-height:100px; border-style:solid; row-gap:1.4rem;}
+.piece{
+  position:relative; background:linear-gradient(160deg,var(--piece),#3a2a5c);
+  border:2px solid var(--piece-b); border-radius:14px;
+  width:78px; height:78px; display:flex; flex-direction:column;
+  align-items:center; justify-content:center; cursor:grab; user-select:none;
+  box-shadow:0 4px 10px rgba(0,0,0,.4); transition:transform .15s;
+}
+.piece:hover{transform:translateY(-3px);}
+.piece::before,.piece::after{
+  content:""; position:absolute; width:16px; height:16px; background:inherit;
+  border:2px solid var(--piece-b); border-radius:50%;
+}
+.piece::before{left:-9px; top:50%; margin-top:-9px; border-right:none;}
+.piece::after{right:-9px; top:50%; margin-top:-9px; border-left:none;}
+.piece .deg{font-size:.65rem; color:var(--sub);}
+.piece .name{font-size:1.05rem; font-weight:bold;}
+.piece.dragging{opacity:.35;}
+#sequence .piece{cursor:pointer;}
+#sequence .piece .x{
+  position:absolute; top:2px; right:2px; font-size:.65rem; color:var(--sub);
+}
+.beat-ctrl{
+  position:absolute; bottom:-10px; display:flex; align-items:center; gap:3px;
+  background:var(--panel); border:1px solid var(--accent2); border-radius:8px;
+  padding:1px 4px; font-size:.65rem;
+}
+.beat-ctrl button{
+  width:16px; height:16px; padding:0; font-size:.7rem; line-height:1;
+  border-radius:5px; border:none; background:var(--accent2); color:var(--text);
+}
+.bpm-label{color:var(--sub); font-size:.8rem; align-self:center;}
+#bpmInput{width:70px;}
+.empty-msg{color:var(--sub); font-size:.85rem; padding:.5rem;}
+</style>
+</head>
+<body>
+<h1>🎹 コード進行パズル</h1>
+<div class="sub">コードのピースをドラッグして、進行を組み立てよう</div>
+
+<div class="wrap">
+  <div class="controls">
+    <select id="keySel"></select>
+    <select id="modeSel">
+      <option value="major">メジャーキー</option>
+      <option value="minor">マイナーキー</option>
+    </select>
+    <span class="bpm-label">BPM</span>
+    <input type="number" id="bpmInput" value="100" min="20" max="300" step="1">
+    <button class="primary" id="playBtn">▶ 再生</button>
+    <button id="clearBtn">クリア</button>
+  </div>
+
+  <div class="section-title">ダイアトニックコード（ドラッグして下へ）</div>
+  <div id="palette"></div>
+
+  <div class="section-title">あなたの進行（クリックで削除・−/＋で拍数変更）</div>
+  <div id="sequence"><div class="empty-msg">ここにコードを並べてください</div></div>
+</div>
+
+<script>
+const NOTE_NAMES = ["C","C#","D","D#","E","F","F#","G","G#","A","A#","B"];
+const MAJOR_STEPS = [0,2,4,5,7,9,11];
+const MINOR_STEPS = [0,2,3,5,7,8,10];
+const MAJOR_QUALITY = ["","m","m","","","m","dim"];
+const MINOR_QUALITY = ["m","dim","","m","m","",""];
+const QUALITY_INTERVALS = {"":[0,4,7], "m":[0,3,7], "dim":[0,3,6]};
+const DEG_LABELS_MAJ = ["I","ii","iii","IV","V","vi","vii°"];
+const DEG_LABELS_MIN = ["i","ii°","III","iv","v","VI","VII"];
+
+const keySel = document.getElementById('keySel');
+const modeSel = document.getElementById('modeSel');
+NOTE_NAMES.forEach((n,i)=>{
+  const o=document.createElement('option'); o.value=i; o.textContent=n; keySel.appendChild(o);
+});
+keySel.value=0;
+
+let sequence = [];
+let audioCtx = null;
+
+function buildChords(){
+  const key = parseInt(keySel.value);
+  const mode = modeSel.value;
+  const steps = mode==='major'?MAJOR_STEPS:MINOR_STEPS;
+  const quals = mode==='major'?MAJOR_QUALITY:MINOR_QUALITY;
+  const labels = mode==='major'?DEG_LABELS_MAJ:DEG_LABELS_MIN;
+  return steps.map((s,i)=>{
+    const rootIdx = (key+s)%12;
+    return {
+      root: rootIdx,
+      quality: quals[i],
+      label: labels[i],
+      name: NOTE_NAMES[rootIdx]+quals[i]
+    };
+  });
+}
+
+function renderPalette(){
+  const palette = document.getElementById('palette');
+  palette.innerHTML='';
+  buildChords().forEach(chord=>{
+    const el = makePieceEl(chord, false);
+    palette.appendChild(el);
+  });
+}
+
+function makePieceEl(chord, inSequence){
+  const el = document.createElement('div');
+  el.className='piece';
+  el.draggable=true;
+  el.dataset.root=chord.root;
+  el.dataset.quality=chord.quality;
+  const beatsHtml = inSequence
+    ? `<div class="beat-ctrl"><button class="beatMinus">−</button><span class="beatNum">${chord.beats}拍</span><button class="beatPlus">＋</button></div>`
+    : '';
+  el.innerHTML = `<div class="deg">${chord.label}</div><div class="name">${chord.name}</div>${inSequence?'<div class="x">×</div>':''}${beatsHtml}`;
+  el.addEventListener('dragstart',e=>{
+    el.classList.add('dragging');
+    e.dataTransfer.setData('text/plain', JSON.stringify({root:chord.root,quality:chord.quality,label:chord.label,name:chord.name,fromSeq:inSequence}));
+  });
+  el.addEventListener('dragend',()=>el.classList.remove('dragging'));
+  if(inSequence){
+    el.addEventListener('click',(e)=>{
+      if(e.target.closest('.beat-ctrl')) return;
+      const idx = Array.from(el.parentNode.children).indexOf(el);
+      sequence.splice(idx,1);
+      renderSequence();
+    });
+    el.querySelector('.beatMinus').addEventListener('click',(e)=>{
+      e.stopPropagation();
+      const idx = Array.from(el.parentNode.children).indexOf(el);
+      sequence[idx].beats = Math.max(1, sequence[idx].beats-1);
+      renderSequence();
+    });
+    el.querySelector('.beatPlus').addEventListener('click',(e)=>{
+      e.stopPropagation();
+      const idx = Array.from(el.parentNode.children).indexOf(el);
+      sequence[idx].beats = sequence[idx].beats+1;
+      renderSequence();
+    });
+  }
+  return el;
+}
+
+function renderSequence(){
+  const seqEl = document.getElementById('sequence');
+  seqEl.innerHTML='';
+  if(sequence.length===0){
+    seqEl.innerHTML='<div class="empty-msg">ここにコードを並べてください</div>';
+    return;
+  }
+  sequence.forEach(chord=>{
+    seqEl.appendChild(makePieceEl(chord, true));
+  });
+}
+
+const seqContainer = document.getElementById('sequence');
+seqContainer.addEventListener('dragover', e=>e.preventDefault());
+seqContainer.addEventListener('drop', e=>{
+  e.preventDefault();
+  try{
+    const data = JSON.parse(e.dataTransfer.getData('text/plain'));
+    if(!data.fromSeq){
+      sequence.push({root:data.root,quality:data.quality,label:data.label,name:data.name,beats:4});
+      renderSequence();
+    }
+  }catch(err){}
+});
+
+function ensureAudio(){
+  if(!audioCtx) audioCtx = new (window.AudioContext||window.webkitAudioContext)();
+}
+
+function playChord(root, quality, startTime, duration){
+  const intervals = QUALITY_INTERVALS[quality];
+  intervals.forEach(iv=>{
+    const midi = 60 + root + iv;
+    const freq = 440 * Math.pow(2, (midi-69)/12);
+    const osc = audioCtx.createOscillator();
+    const gain = audioCtx.createGain();
+    osc.type='sine';
+    osc.frequency.value=freq;
+    gain.gain.setValueAtTime(0, startTime);
+    gain.gain.linearRampToValueAtTime(0.18, startTime+0.03);
+    gain.gain.linearRampToValueAtTime(0, startTime+duration);
+    osc.connect(gain).connect(audioCtx.destination);
+    osc.start(startTime);
+    osc.stop(startTime+duration+0.05);
+  });
+}
+
+document.getElementById('playBtn').addEventListener('click',()=>{
+  if(sequence.length===0) return;
+  ensureAudio();
+  if(audioCtx.state==='suspended') audioCtx.resume();
+  const bpm = Math.max(20, Math.min(300, parseInt(document.getElementById('bpmInput').value)||100));
+  const secPerBeat = 60/bpm;
+  let t = audioCtx.currentTime + 0.05;
+  sequence.forEach(chord=>{
+    const dur = secPerBeat * chord.beats;
+    playChord(chord.root, chord.quality, t, dur*0.92);
+    t += dur;
+  });
+});
+
+document.getElementById('clearBtn').addEventListener('click',()=>{
+  sequence=[];
+  renderSequence();
+});
+
+keySel.addEventListener('change', renderPalette);
+modeSel.addEventListener('change', renderPalette);
+
+renderPalette();
+renderSequence();
+</script>
+</body>
+</html>
